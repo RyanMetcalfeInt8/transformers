@@ -203,6 +203,7 @@ class MusicgenAttention(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
+        return_only_new_kv: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
 
@@ -211,6 +212,8 @@ class MusicgenAttention(nn.Module):
         is_cross_attention = key_value_states is not None
 
         bsz, tgt_len, _ = hidden_states.size()
+
+        past_key_value_to_return = None
 
         # get query proj
         query_states = self.q_proj(hidden_states) * self.scaling
@@ -234,6 +237,11 @@ class MusicgenAttention(nn.Module):
             # reuse k, v, self_attention
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+
+            if return_only_new_kv:
+                print("only returning new kv!")
+                past_key_value_to_return = (key_states, value_states)
+
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
         else:
@@ -250,6 +258,9 @@ class MusicgenAttention(nn.Module):
             # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_states, value_states)
+
+        if past_key_value_to_return is None:
+            past_key_value_to_return = past_key_value
 
         proj_shape = (bsz * self.num_heads, -1, self.head_dim)
         query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
@@ -313,7 +324,7 @@ class MusicgenAttention(nn.Module):
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights_reshaped, past_key_value
+        return attn_output, attn_weights_reshaped, past_key_value_to_return
 
 
 # Copied from transformers.models.bart.modeling_bart.BartFlashAttention2 with Bart->Musicgen
@@ -344,6 +355,7 @@ class MusicgenFlashAttention2(MusicgenAttention):
         attention_mask: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
+        return_only_new_kv: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         # MusicgenFlashAttention2 attention does not support output_attentions
         if output_attentions:
@@ -453,6 +465,7 @@ class MusicgenSdpaAttention(MusicgenAttention):
         attention_mask: Optional[torch.Tensor] = None,
         layer_head_mask: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
+        return_only_new_kv: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
         if output_attentions or layer_head_mask is not None:
@@ -468,6 +481,7 @@ class MusicgenSdpaAttention(MusicgenAttention):
                 attention_mask=attention_mask,
                 layer_head_mask=layer_head_mask,
                 output_attentions=output_attentions,
+                return_only_new_kv=return_only_new_kv
             )
 
         if (
@@ -493,6 +507,8 @@ class MusicgenSdpaAttention(MusicgenAttention):
 
         bsz, tgt_len, _ = hidden_states.size()
 
+        past_key_value_to_return = None
+
         # get query proj
         query_states = self.q_proj(hidden_states)
         # get key, value proj
@@ -515,6 +531,11 @@ class MusicgenSdpaAttention(MusicgenAttention):
             # reuse k, v, self_attention
             key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
+
+            if return_only_new_kv:
+                print("only returning new kv!")
+                past_key_value_to_return = (key_states, value_states)
+
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
         else:
@@ -531,6 +552,9 @@ class MusicgenSdpaAttention(MusicgenAttention):
             # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
             # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_states, value_states)
+
+        if past_key_value_to_return is None:
+            past_key_value_to_return = past_key_value
 
         query_states = self._shape(query_states, tgt_len, bsz)
 
@@ -564,7 +588,8 @@ class MusicgenSdpaAttention(MusicgenAttention):
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, None, past_key_value
+        return attn_output, None, past_key_value_to_return
+        #return attn_output, None, past_key_value
 
 
 MUSICGEN_ATTENTION_CLASSES = {
@@ -618,6 +643,7 @@ class MusicgenDecoderLayer(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = True,
+        return_only_new_kv: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -638,19 +664,31 @@ class MusicgenDecoderLayer(nn.Module):
                 returned tensors for more detail.
         """
         residual = hidden_states
+
         hidden_states = self.self_attn_layer_norm(hidden_states)
 
         # Self Attention
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
-        self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
+        #self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
+
+        # Modification here: We want the ability to pass *only* encoder past kv values in,
+        # so changed here to only set self_attn_past_key_value (decoder kv) only if past_key_value
+        # is of length 4 (meaning, both encoder & decoder past kv were set)
+        if past_key_value is not None and len(past_key_value) == 4:
+            self_attn_past_key_value = past_key_value[:2]
+        else:
+            self_attn_past_key_value = None
         # add present self-attn cache to positions 1,2 of present_key_value tuple
+
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
             past_key_value=self_attn_past_key_value,
             attention_mask=attention_mask,
             layer_head_mask=layer_head_mask,
             output_attentions=output_attentions,
+            return_only_new_kv=return_only_new_kv
         )
+
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
 
@@ -975,7 +1013,10 @@ class MusicgenDecoder(MusicgenPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        past_key_length_tens: Optional[torch.LongTensor] = None,
+        return_only_new_kv: bool = False,
     ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -998,10 +1039,16 @@ class MusicgenDecoder(MusicgenPreTrainedModel):
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
         # past_key_values_length
-        past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+        #past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+        if past_key_values is not None and len(past_key_values[0])==4:
+            past_key_values_length = past_key_values[0][0].shape[2]
+        else:
+            past_key_values_length = 0
 
         if inputs_embeds is None:
             inputs_embeds = sum([self.embed_tokens[codebook](input[:, codebook]) for codebook in range(num_codebooks)])
+
+        self.attn_implementation = "legacy"
 
         if self.attn_implementation == "flash_attention_2":
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
@@ -1039,10 +1086,12 @@ class MusicgenDecoder(MusicgenPreTrainedModel):
                 )
 
         # embed positions
-        positions = self.embed_positions(input, past_key_values_length)
+        if past_key_length_tens is not None:
+            positions = self.embed_positions(input, past_key_length_tens[0])
+        else:
+            positions = self.embed_positions(input, past_key_values_length)
 
         hidden_states = inputs_embeds + positions.to(inputs_embeds.device)
-
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
 
         if self.gradient_checkpointing and self.training:
@@ -1067,6 +1116,7 @@ class MusicgenDecoder(MusicgenPreTrainedModel):
                         f" {attn_mask.size()[0]}."
                     )
         for idx, decoder_layer in enumerate(self.layers):
+            #print("DECODER LAYER ", idx)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -1102,6 +1152,7 @@ class MusicgenDecoder(MusicgenPreTrainedModel):
                     past_key_value=past_key_value,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
+                    return_only_new_kv=return_only_new_kv
                 )
             hidden_states = layer_outputs[0]
 
@@ -1171,7 +1222,11 @@ class MusicgenModel(MusicgenPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        past_key_length_tens: Optional[torch.LongTensor] = None,
+        return_only_new_kv: bool = False,
     ) -> Union[Tuple, BaseModelOutputWithPastAndCrossAttentions]:
+
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1193,6 +1248,8 @@ class MusicgenModel(MusicgenPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            past_key_length_tens=past_key_length_tens,
+            return_only_new_kv=return_only_new_kv
         )
 
         if not return_dict:
@@ -1260,6 +1317,8 @@ class MusicgenForCausalLM(MusicgenPreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        past_key_length_tens: Optional[torch.LongTensor] = None,
+        return_only_new_kv: bool = False,
     ) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length, num_codebooks)`, *optional*):
@@ -1274,6 +1333,8 @@ class MusicgenForCausalLM(MusicgenPreTrainedModel, GenerationMixin):
         if (labels is not None) and (input_ids is None and inputs_embeds is None):
             input_ids = shift_tokens_right(labels, self.config.pad_token_id, self.config.bos_token_id)
 
+
+        #print("MusicgenForCausalLM: encoder_hidden_states shape = ", encoder_hidden_states.shape)
         outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
@@ -1287,6 +1348,8 @@ class MusicgenForCausalLM(MusicgenPreTrainedModel, GenerationMixin):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            return_only_new_kv=return_only_new_kv,
+            past_key_length_tens=past_key_length_tens,
         )
 
         hidden_states = outputs[0]
@@ -1356,6 +1419,7 @@ class MusicgenForCausalLM(MusicgenPreTrainedModel, GenerationMixin):
         # apply the delay pattern mask
         input_ids = self.apply_delay_pattern_mask(input_ids, delay_pattern_mask)
 
+        #print("guidance_scale = ", guidance_scale)
         if guidance_scale is not None and guidance_scale > 1:
             # for classifier free guidance we need to replicate the decoder args across the batch dim (we'll split these
             # before sampling)
@@ -1719,6 +1783,8 @@ class MusicgenForConditionalGeneration(PreTrainedModel, GenerationMixin):
         self.audio_encoder = audio_encoder
         self.decoder = decoder
 
+        #self.n_forwards = 0
+
         if self.text_encoder.config.to_dict() != self.config.text_encoder.to_dict():
             logger.warning(
                 f"Config of the text_encoder: {self.text_encoder.__class__} is overwritten by shared text_encoder config:"
@@ -2034,6 +2100,7 @@ class MusicgenForConditionalGeneration(PreTrainedModel, GenerationMixin):
         decoder_attention_mask: Optional[torch.BoolTensor] = None,
         encoder_outputs: Optional[Tuple[torch.FloatTensor]] = None,
         past_key_values: Tuple[Tuple[torch.FloatTensor]] = None,
+        past_key_length_tens: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         decoder_inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
@@ -2041,6 +2108,7 @@ class MusicgenForConditionalGeneration(PreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        return_only_new_kv: bool = False,
         **kwargs,
     ) -> Union[Tuple, Seq2SeqLMOutput]:
         r"""
@@ -2070,6 +2138,9 @@ class MusicgenForConditionalGeneration(PreTrainedModel, GenerationMixin):
         >>> logits.shape  # (bsz * num_codebooks, tgt_len, vocab_size)
         torch.Size([8, 1, 2048])
         ```"""
+
+        #print("MusicgenForConditionalGeneration: forward ", self.n_forwards)
+
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         kwargs_text_encoder = {
@@ -2088,6 +2159,7 @@ class MusicgenForConditionalGeneration(PreTrainedModel, GenerationMixin):
             argument[len("decoder_") :]: value for argument, value in kwargs.items() if argument.startswith("decoder_")
         }
 
+        #print("type(encoder_outputs) = ", type(encoder_outputs))
         if encoder_outputs is None:
             encoder_outputs = self.text_encoder(
                 input_ids=input_ids,
@@ -2102,6 +2174,29 @@ class MusicgenForConditionalGeneration(PreTrainedModel, GenerationMixin):
             encoder_outputs = BaseModelOutput(*encoder_outputs)
 
         encoder_hidden_states = encoder_outputs[0]
+
+        #print("encoder_hidden_states shape = ", encoder_hidden_states.shape)
+        #print("attention_mask shape = ", attention_mask.shape)
+        #print("decoder_input_ids shape = ", decoder_input_ids.shape)
+
+        '''
+        if self.n_forwards == 0:
+            if False:
+                import numpy as np
+                np.save("encoder_hidden_states.npy", encoder_hidden_states.numpy())
+                np.save("attention_mask.npy", attention_mask.numpy())
+                np.save("decoder_input_ids.npy", decoder_input_ids.numpy())
+
+                np.save("enc_out_last_hidden_state.npy", encoder_outputs.last_hidden_state.numpy())
+                #np.save("enc_out_hidden_states.npy", encoder_outputs.hidden_states.numpy())
+                #np.save("enc_out_attentions.npy", encoder_outputs.attentions.numpy())
+            else:
+                print("saving npy's disabled..")
+        else:
+            print("exiting on 2nd call to fwd!")
+            import sys
+            sys.exit(0)
+        '''
 
         # optionally project encoder_hidden_states
         if (
@@ -2151,12 +2246,33 @@ class MusicgenForConditionalGeneration(PreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             return_dict=return_dict,
             labels=labels,
+            past_key_length_tens=past_key_length_tens,
+            return_only_new_kv=return_only_new_kv,
             **kwargs_decoder,
         )
 
+        '''
+        if self.n_forwards == 0:
+            logits = decoder_outputs.logits
+            print("output logits.shape = ", logits.shape)
+            print("first 10 vals of output logits (7th index):")
+            print(logits[7, 0, 0:10])
+
+            past_key_values = decoder_outputs.past_key_values
+            for past_key_value_tuplei in range(len(past_key_values)):
+                for past_key_value_tupleii in range(len(past_key_values[past_key_value_tuplei])):
+                    if past_key_value_tuplei==0 and past_key_value_tupleii==0:
+                        new_kay_val = past_key_values[past_key_value_tuplei][past_key_value_tupleii]
+                        print("new_kay_val.shape = ", new_kay_val.shape)
+                        print("first 10 vals of new key val:")
+                        print(new_kay_val[0, 0, 0, 0:10])
+                    #np.save("past_key_value_" + str(past_key_value_tuplei) + "_" + str(past_key_value_tupleii) + ".npy", past_key_values[past_key_value_tuplei][past_key_value_tupleii].numpy())
+
+        '''
         if not return_dict:
             return decoder_outputs + encoder_outputs
 
+        #self.n_forwards += 1
         return Seq2SeqLMOutput(
             loss=decoder_outputs.loss,
             logits=decoder_outputs.logits,
