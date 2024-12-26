@@ -10,13 +10,18 @@ random.seed(my_seed)
 torch.manual_seed(my_seed)
 os.environ["PYTHONHASHSEED"] = str(my_seed)
 
-processor = AutoProcessor.from_pretrained("facebook/musicgen-small")
-model = MusicgenForConditionalGeneration.from_pretrained("facebook/musicgen-small")
+model_id="facebook/musicgen-small"
+#model_id="facebook/musicgen-stereo-small"
+#model_id="facebook/musicgen-medium"
+#model_id="facebook/musicgen-stereo-medium"
+
+processor = AutoProcessor.from_pretrained(model_id)
+model = MusicgenForConditionalGeneration.from_pretrained(model_id)
 
 audio_to_continue = torch.from_numpy(np.load("audio_values.npy")).squeeze(0).squeeze(0)
 print("audio_to_continue shape = ", audio_to_continue.shape)
 inputs = processor(
-    audio=audio_to_continue,
+    #audio=audio_to_continue,
     text=["80s pop track with bassy drums and synth"],
     #padding=True,
     return_tensors="pt",
@@ -89,8 +94,11 @@ def generate_initial_cross_attn_kv_producer(model):
     attention_mask = attention_mask_padded
     
     initial_cross_attn_producer.eval()
-    output_names=[]            
-    for l in range(0, 24):
+    output_names=[] 
+
+    num_hidden_layers = model.config.decoder.num_hidden_layers
+    
+    for l in range(0, num_hidden_layers):
         for i in range(0, 2):
             output_names.append("new_key_value_" + str(l) + "_" + str(i))
             
@@ -149,6 +157,7 @@ class MusicGenWrapper(nn.Module):
         if past_key_values is not None and past_key_length_tens is not None:
             return_only_new_kv = True
         
+        print("setting return_only_new_kv to ", return_only_new_kv)
         ret = self.model(decoder_input_ids=decoder_input_ids, 
                          attention_mask=attention_mask, 
                          encoder_outputs=encoder_outputs, 
@@ -180,13 +189,20 @@ def generate_decode_kvcache(model):
         model.config.return_dict = True
         model.eval()
         
+        
+        num_codebooks = model.config.decoder.num_codebooks
+        
         past_key_num_tokens = 64
-        decoder_input_ids = torch.ones(8, 1, dtype=torch.int64)
+        decoder_input_ids = torch.ones(num_codebooks*2, 1, dtype=torch.int64)
         attention_mask = torch.zeros(2, 64, dtype=torch.int64)
         encoder_outputs = ( torch.randn(2, 64, 768), )
         past_key_values = []
-        for i in range(24):
-            past_key_values.append( (torch.randn(2, 16, past_key_num_tokens, 64),torch.randn(2, 16, past_key_num_tokens, 64),torch.randn(2, 16, 64, 64),torch.randn(2, 16, 64, 64)) )
+        
+        num_attention_heads = model.config.decoder.num_attention_heads
+        num_hidden_layers = model.config.decoder.num_hidden_layers
+        
+        for i in range(num_hidden_layers):
+            past_key_values.append( (torch.randn(2, num_attention_heads, past_key_num_tokens, 64),torch.randn(2, num_attention_heads, past_key_num_tokens, 64),torch.randn(2, num_attention_heads, 64, 64),torch.randn(2, num_attention_heads, 64, 64)) )
         
         decoder_attention_mask = torch.zeros(2,past_key_num_tokens+1, dtype=torch.int64)
         decoder_attention_mask[:, -1] = 1
@@ -234,11 +250,11 @@ def generate_decode_kvcache(model):
         openvino.runtime.save_model(ov_model, "musicgen_decoder.xml")
         
         from nncf import compress_weights, CompressWeightsMode
-        #ov_model_compressed = compress_weights(ov_model)
-        #openvino.save_model(ov_model_compressed, "musicgen_decoder_int8.xml")
+        ov_model_compressed = compress_weights(ov_model)
+        openvino.save_model(ov_model_compressed, "musicgen_decoder_int8.xml")
         
-        ov_model_compressed = compress_weights(ov_model, mode=CompressWeightsMode.INT4_ASYM)
-        openvino.save_model(ov_model_compressed, "musicgen_decoder_int4.xml")
+        #ov_model_compressed = compress_weights(ov_model, mode=CompressWeightsMode.INT4_ASYM)
+        #openvino.save_model(ov_model_compressed, "musicgen_decoder_int4.xml")
         
         print("done saving kv cache model")
         
@@ -249,13 +265,20 @@ def generate_decode_nonkvcache(model):
         model.config.return_dict = True
         model.eval()
         
+        num_codebooks = model.config.decoder.num_codebooks
         
-        decoder_input_ids = torch.ones(8, 254, dtype=torch.int64)
+        decoder_input_ids = torch.ones(num_codebooks*2, 254, dtype=torch.int64)
         attention_mask = torch.zeros(2, 64, dtype=torch.int64)
         encoder_outputs = ( torch.randn(2, 64, 768), )
         past_key_values = []
-        for i in range(24):
-            past_key_values.append( (torch.randn(2, 16, 64, 64),torch.randn(2, 16, 64, 64)) )
+        
+        
+        num_attention_heads = model.config.decoder.num_attention_heads
+        
+        num_hidden_layers = model.config.decoder.num_hidden_layers
+        
+        for i in range(num_hidden_layers):
+            past_key_values.append( (torch.randn(2, num_attention_heads, 64, 64),torch.randn(2, num_attention_heads, 64, 64)) )
 
         
         dummy_inputs = {}
@@ -290,9 +313,10 @@ def generate_decode_nonkvcache(model):
         ov_model.validate_nodes_and_infer_types()
         openvino.runtime.save_model(ov_model, "musicgen_decoder_nonkv.xml")
         
-        #from nncf import compress_weights, CompressWeightsMode
-        #ov_model_compressed = compress_weights(ov_model)
-        #openvino.save_model(ov_model_compressed, "musicgen_decoder_int8.xml")
+        from nncf import compress_weights, CompressWeightsMode
+        ov_model_compressed = compress_weights(ov_model)
+        openvino.save_model(ov_model_compressed, "musicgen_decoder_nonkv_int8.xml")
+        
         
         #ov_model_compressed = compress_weights(ov_model, mode=CompressWeightsMode.INT4_ASYM)
         #openvino.save_model(ov_model_compressed, "musicgen_decoder_int4.xml")
@@ -361,24 +385,35 @@ def manual_decode(model):
                     )
     
 
-generate_initial_cross_attn_kv_producer(model)
-generate_decode_kvcache(model)
-generate_decode_nonkvcache(model)
+if True:
+    generate_initial_cross_attn_kv_producer(model)
+    generate_decode_kvcache(model)
+    generate_decode_nonkvcache(model)
 
-print("done saving all IRs")
-import sys
-sys.exit(0)
-if False:
+    print("done saving all IRs")
+    import sys
+    sys.exit(0)
+elif False:
     test(model)
     import sys
     sys.exit()
 elif False:
     test_decode(model)
 else:
+    
+    print("num_attention_heads = ", model.config.decoder.num_attention_heads)
     audio_values = model.generate(**inputs, do_sample=True, guidance_scale=3, max_new_tokens=256)
     
-   
+    print("audio_values.shape = ", audio_values.shape)
     #np.save("audio_values.npy", audio_values)
 
     sampling_rate = model.config.audio_encoder.sampling_rate
-    scipy.io.wavfile.write("musicgen_out.wav", rate=sampling_rate, data=audio_values[0, 0].numpy())
+    
+        # Remove the batch dimension (1,) and transpose to (161920, 2) for stereo
+    stereo_data = audio_values.squeeze(0).T.numpy()
+
+    # Normalize and convert to 16-bit PCM format
+    stereo_data = (stereo_data * 32767).astype(np.int16)
+
+    #scipy.io.wavfile.write("musicgen_out.wav", rate=sampling_rate, data=audio_values[0].numpy())
+    scipy.io.wavfile.write("musicgen_out.wav", rate=sampling_rate, data=stereo_data)
