@@ -499,6 +499,7 @@ class MusicgenSdpaAttention(MusicgenAttention):
                 attention_mask=attention_mask,
                 layer_head_mask=layer_head_mask,
                 output_attentions=output_attentions,
+                return_only_new_kv=return_only_new_kv
             )
 
         # if key_value_states are provided this layer is used as a cross-attention layer
@@ -2178,6 +2179,15 @@ class MusicgenForConditionalGeneration(PreTrainedModel, GenerationMixin):
         #print("encoder_hidden_states shape = ", encoder_hidden_states.shape)
         #print("attention_mask shape = ", attention_mask.shape)
         #print("decoder_input_ids shape = ", decoder_input_ids.shape)
+
+        #if past_key_values:
+        #    print("len(past_key_values) = ", len(past_key_values))
+        #    for past_key_value_tuplei in range(len(past_key_values)):
+        #        for past_key_value_tupleii in range(len(past_key_values[past_key_value_tuplei])):
+        #            if past_key_value_tuplei==0:
+        #                new_kay_val = past_key_values[past_key_value_tuplei][past_key_value_tupleii]
+        #                print(past_key_value_tupleii, "new_kay_val.shape = ", new_kay_val.shape)
+
 
         '''
         if self.n_forwards == 0:
