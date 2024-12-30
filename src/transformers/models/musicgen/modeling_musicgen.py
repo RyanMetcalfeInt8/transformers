@@ -985,6 +985,8 @@ class MusicgenDecoder(MusicgenPreTrainedModel):
             config.hidden_size,
         )
 
+        config._attn_implementation = "eager"
+
         self.layers = nn.ModuleList([MusicgenDecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.layer_norm = nn.LayerNorm(config.hidden_size)
         self.attn_implementation = config._attn_implementation
@@ -1048,8 +1050,6 @@ class MusicgenDecoder(MusicgenPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = sum([self.embed_tokens[codebook](input[:, codebook]) for codebook in range(num_codebooks)])
-
-        self.attn_implementation = "legacy"
 
         if self.attn_implementation == "flash_attention_2":
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
