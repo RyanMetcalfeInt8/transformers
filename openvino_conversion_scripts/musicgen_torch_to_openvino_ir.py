@@ -89,7 +89,7 @@ def generate_initial_cross_attn_kv_producer(model, dst_folder="."):
         openvino.runtime.save_model(ov_model, os.path.join(dst_folder, "initial_cross_attn_kv_producer.xml"), compress_to_fp16=True)
 
         print("done generating initial_cross_attn_kv_producer.xml")
-        
+
 import torch.nn as nn
 class MusicGenWrapper(nn.Module):
     def __init__(self, model):
@@ -305,8 +305,68 @@ def generate_decode_nonkvcache(model, dst_folder="."):
 
         print("done saving nonkv cache model!")
 
+class EncodecEncoderWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, inputs):
+        encoder_outputs = self.model.encode(inputs)
+        return encoder_outputs.audio_codes
+
+class EncodecDecodeWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, audio_codes):
+        audio_values = self.model.decode(audio_codes, [None])
+        return audio_values
+
+def convert_encodec_encode():
+    from transformers import EncodecModel, AutoProcessor
+    model = EncodecModel.from_pretrained("facebook/encodec_32khz")
+
+    input_dummy = torch.zeros([1, 1, 320000], dtype=torch.float32)
+
+    wrapper = EncodecEncoderWrapper(model)
+    import openvino
+    from openvino.tools.ovc import convert_model
+
+    with torch.no_grad():
+        ov_model = convert_model(wrapper, example_input=input_dummy)
+        ov_model.validate_nodes_and_infer_types()
+        ov_model.inputs[0].get_tensor().set_names({"input_values"})
+        ov_model.outputs[0].get_tensor().set_names({"audio_codes"})
+        openvino.runtime.save_model(ov_model, "openvino_encodec_encode.xml", compress_to_fp16=True)
+
+    print("done saving openvino_encodec_encode.xml")
+
+
+def convert_encodec_decode():
+    from transformers import EncodecModel, AutoProcessor
+    model = EncodecModel.from_pretrained("facebook/encodec_32khz")
+
+    input_dummy = torch.zeros([1, 1, 4, 500], dtype=torch.int64)
+    wrapper = EncodecDecodeWrapper(model)
+    import openvino
+    from openvino.tools.ovc import convert_model
+
+    with torch.no_grad():
+        ov_model = convert_model(wrapper, example_input=input_dummy)
+        ov_model.validate_nodes_and_infer_types()
+        ov_model.inputs[0].get_tensor().set_names({"audio_codes"})
+        ov_model.outputs[0].get_tensor().set_names({"audio_values"})
+        openvino.runtime.save_model(ov_model, "openvino_encodec_decode.xml", compress_to_fp16=True)
+
+    print("done saving openvino_encodec_decode.xml")
 
 if __name__ == "__main__":
+
+    #convert_encodec_encode()
+    #convert_encodec_decode()
+    #import sys
+    #sys.exit(0)
 
     def create_directory(dir_path):
         if os.path.exists(dir_path):
@@ -314,32 +374,32 @@ if __name__ == "__main__":
             sys.exit(1)
         else:
             os.makedirs(dir_path)
-    
+
     model_id="facebook/musicgen-small"
     #model_id="facebook/musicgen-stereo-small"
     #model_id="facebook/musicgen-medium"
     #model_id="facebook/musicgen-stereo-medium"
-    
-    
+
+
     ov_ir_output_folder = model_id.split("/")[-1] + "-openvino"
     create_directory(ov_ir_output_folder)
 
-    model = MusicgenForConditionalGeneration.from_pretrained(model_id)    
-    
+    model = MusicgenForConditionalGeneration.from_pretrained(model_id)
+
     generate_initial_cross_attn_kv_producer(model, dst_folder=ov_ir_output_folder)
-    
+
     intermediate_dir=os.path.join(ov_ir_output_folder, "intermediate")
     generate_decode_kvcache(model, dst_folder=intermediate_dir)
     generate_decode_nonkvcache(model, dst_folder=intermediate_dir)
-   
-    
+
+
     #okay, combine some bins
-    input_ir_files=[ 
+    input_ir_files=[
         os.path.join(intermediate_dir, "musicgen_decoder_nonkv.xml"),
-        os.path.join(intermediate_dir, "musicgen_decoder.xml")]     
+        os.path.join(intermediate_dir, "musicgen_decoder.xml")]
     consolidate_ir_bins_in_folder(input_ir_files=input_ir_files, output_folder=ov_ir_output_folder, combined_bin_name="musicgen_decoder_combined.bin")
-    
-    input_ir_files=[ 
+
+    input_ir_files=[
         os.path.join(intermediate_dir, "musicgen_decoder_nonkv_int8.xml"),
-        os.path.join(intermediate_dir, "musicgen_decoder_int8.xml")]     
+        os.path.join(intermediate_dir, "musicgen_decoder_int8.xml")]
     consolidate_ir_bins_in_folder(input_ir_files=input_ir_files, output_folder=ov_ir_output_folder, combined_bin_name="musicgen_decoder_int8_combined.bin")
